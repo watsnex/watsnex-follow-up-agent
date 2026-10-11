@@ -25,7 +25,7 @@ Every few minutes:
      nicknames, middle initials like "Arra G", accents, credentials) and Claude decides whether one
      is the same person, using their past meetings and emails as evidence.
 5. **New person → creates a Follow -Up Status row** with the Name, a short Note (meeting type, date,
-   title, company and email when known) and the **Suggested Meeting Type** dropdown, which is always
+   title, company and email when known), the **Meeting Date**, and the **Suggested Meeting Type** dropdown, which is always
    filled in. The type comes from, in order: the same meeting's Meeting Type in Dashboard CRM; the
    title's keywords (podcast, pre-podcast, follow up, growth plan, discovery, intro, and Calendly's
    "<Name> and WATSNEX BioPharma" introduction titles); otherwise Claude's guess, which is flagged.

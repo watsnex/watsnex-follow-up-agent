@@ -54,6 +54,14 @@ function createdFromEvent(p: Person, key: string): boolean {
   return p.agentRef === agentRef(key) || p.note.includes(`[${agentRef(key)}]`);
 }
 
+/** "2026-10-13", the meeting's day in Montreal time, for Airtable date columns. */
+function isoDate(start: string): string | null {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(start)) return start; // all-day event
+  const d = new Date(start);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("en-CA", { timeZone: "America/Toronto" });
+}
+
 /** "13 Oct 2026", in Montreal time. */
 function friendlyDate(start: string): string {
   if (!start) return "";
@@ -272,6 +280,8 @@ async function handleEvent(
     [PEOPLE_FIELDS.agentRef]: agentRef(key),
   };
   if (meeting.type) fields[PEOPLE_FIELDS.meetingType] = meeting.type;
+  const meetingDay = isoDate(start);
+  if (meetingDay) fields[PEOPLE_FIELDS.meetingDate] = meetingDay;
   const recordId = await createPerson(cfg, fields);
   people.push({ id: recordId, name, note, agentRef: agentRef(key), emails: clientEmail ? [clientEmail] : [], pastMeetings: [title] });
 

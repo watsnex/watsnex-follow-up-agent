@@ -64,6 +64,7 @@ export const PEOPLE_FIELDS = {
   name: "Name",
   note: "Note",
   meetingType: "Suggested Meeting Type",
+  meetingDate: "Meeting Date",
   // Hidden column holding the calendar event the row was created from, so it's never created twice.
   agentRef: "Agent Ref",
 } as const;
