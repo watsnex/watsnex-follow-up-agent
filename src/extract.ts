@@ -2,6 +2,7 @@ import { z } from "zod";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { getClient, MODEL } from "./anthropic";
 import type { Person } from "./airtable";
+import { MEETING_TYPES } from "./meetingType";
 
 export const EventAnalysisSchema = z.object({
   isClientMeeting: z
@@ -27,6 +28,11 @@ export const EventAnalysisSchema = z.object({
     .describe("If nameConfidence is low: what's uncertain, in one short sentence. Otherwise null."),
   clientEmail: z.string().nullable().describe("The outside person's email, from the attendee list, or null"),
   company: z.string().nullable().describe("The outside person's company/organization if stated, or null"),
+  meetingType: z
+    .enum([...MEETING_TYPES, "Unknown"])
+    .describe(
+      "Which kind of WATSNEX meeting this is, judged from the title and description. 'Unknown' if there's no real clue.",
+    ),
   matchedRecordId: z
     .string()
     .nullable()
@@ -53,6 +59,8 @@ Rules:
 - The calendar owner is never the client. Neither are note-taker bots or WATSNEX team members.
 - Use the attendee list and description to complete or confirm the name (e.g. a display name, or a LinkedIn URL slug). Prefer the title and attendee display names over guesses from an email address.
 - Internal meetings (e.g. "WATSNEX Sync", team standups) are not client meetings.
+
+Meeting types, in the order a client usually goes through them: Introduction Meeting (first call; Calendly books these as "<Name> and WATSNEX BioPharma"), Discovery Meeting, Pre-Podcast Chat (short prep call before a podcast recording), Podcast Meeting (the recording), Growth Plan Meeting (presenting the AI strategic growth plan), Follow Up Meeting (any later check-in).
 
 Matching against existing people — the tracker was filled in by hand, so the same person often appears differently:
 - Same person: missing or extra middle initial ("Arra G" = "Arra G. Yerganian"), nickname ("Jeff" = "Jeffrey", "Chuck" = "Charles"), typos ("Joshn Mann", "Micheal Faith" = "Michael Fath", "Aliasger Slem"), accents, credentials (PhD), name order, or a first-name-only record ("Logan", "Peter") whose known email, company or past meetings line up with this event.

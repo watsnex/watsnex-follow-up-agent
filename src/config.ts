@@ -63,10 +63,15 @@ export type AgentConfig = ReturnType<typeof getAgentConfig>;
 export const PEOPLE_FIELDS = {
   name: "Name",
   note: "Note",
+  meetingType: "Suggested Meeting Type",
+  // Hidden column holding the calendar event the row was created from, so it's never created twice.
+  agentRef: "Agent Ref",
 } as const;
 
 export const MEETING_FIELDS = {
   leadName: "Lead Name",
   email: "Email",
   meetingName: "Meeting Name",
+  meetingType: "Meeting Type",
+  startDate: "Start Date",
 } as const;

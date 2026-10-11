@@ -3,6 +3,7 @@ import { listChangedEvents, type CalendarEvent } from "./google";
 import { loadPeople, createPerson, recordUrl, type Person } from "./airtable";
 import { findCandidates } from "./match";
 import { analyzeEvent } from "./extract";
+import { decideMeetingType, type CrmMeeting } from "./meetingType";
 import { notifySlack } from "./slack";
 import { loadState, saveState, type Outcome } from "./state";
 
@@ -44,8 +45,22 @@ function eventKey(e: CalendarEvent): string {
   return e.recurringEventId ?? e.id;
 }
 
-function marker(key: string): string {
-  return `[gcal:${key}]`;
+function agentRef(key: string): string {
+  return `gcal:${key}`;
+}
+
+/** Rows created before the Agent Ref column existed carry the reference in their Note instead. */
+function createdFromEvent(p: Person, key: string): boolean {
+  return p.agentRef === agentRef(key) || p.note.includes(`[${agentRef(key)}]`);
+}
+
+/** "13 Oct 2026", in Montreal time. */
+function friendlyDate(start: string): string {
+  if (!start) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(start)) start = `${start}T12:00:00Z`; // all-day event
+  const d = new Date(start);
+  if (Number.isNaN(d.getTime())) return start;
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "America/Toronto" });
 }
 
 function stripHtml(text: string): string {
@@ -105,7 +120,7 @@ async function syncOnce(opts: { dryRun?: boolean; since?: Date }): Promise<RunSu
 
   // Loaded once per run; people created during this run are appended so two events for the
   // same new person in one batch don't create two records.
-  const people = await loadPeople(cfg);
+  const { people, crmMeetings } = await loadPeople(cfg);
 
   for (const event of relevant) {
     const key = eventKey(event);
@@ -114,12 +129,13 @@ async function syncOnce(opts: { dryRun?: boolean; since?: Date }): Promise<RunSu
     const previous = state.handled[key];
 
     // Already handled and the title hasn't changed since → nothing new to learn.
-    if (previous && previous.title === title) continue;
+    // (A dry run previews every event; it never writes, so re-checking is harmless.)
+    if (!dryRun && previous && previous.title === title) continue;
     // Once a person record exists for this event, never create another one, even if the title changes.
-    if (previous && previous.outcome !== "not_a_client_meeting") continue;
+    if (!dryRun && previous && previous.outcome !== "not_a_client_meeting") continue;
 
     try {
-      const result = await handleEvent(cfg, event, key, people, dryRun);
+      const result = await handleEvent(cfg, event, key, people, crmMeetings, dryRun);
       summary.results.push(result);
       if (!dryRun && result.outcome !== "error") {
         state.handled[key] = {
@@ -154,6 +170,7 @@ async function handleEvent(
   event: CalendarEvent,
   key: string,
   people: Person[],
+  crmMeetings: CrmMeeting[],
   dryRun: boolean,
 ): Promise<EventResult> {
   const title = event.summary ?? "";
@@ -161,7 +178,7 @@ async function handleEvent(
   const base = { eventId: key, title, start };
 
   // 1. This exact calendar event already produced a record (e.g. state file was lost).
-  const tagged = people.find((p) => p.note.includes(marker(key)));
+  const tagged = people.find((p) => createdFromEvent(p, key));
   if (tagged) {
     return { ...base, outcome: "already_exists", clientName: tagged.name, recordId: tagged.id, detail: "Record already created from this event" };
   }
@@ -214,37 +231,70 @@ async function handleEvent(
   if (nameMatch && analysis.matchConfidence === "possible") {
     reviewReasons.push(`Might be the same person as "${nameMatch.name}" (${recordUrl(cfg, nameMatch.id)})`);
   }
-  const needsReview = reviewReasons.length > 0;
   const name = analysis.clientName || clientEmail || `Unknown – ${title}`;
 
+  // Meeting type is always filled in; a guess (or no answer) is flagged so someone checks it.
+  const meeting = decideMeetingType(crmMeetings, {
+    title,
+    start,
+    emails: clientEmail ? [clientEmail, ...attendeeEmails] : attendeeEmails,
+    guess: analysis.meetingType === "Unknown" ? null : analysis.meetingType,
+  });
+  if (meeting.source === "guess") {
+    reviewReasons.push(`Meeting type is a guess ("${meeting.type}"); please check "${PEOPLE_FIELDS.meetingType}"`);
+  } else if (meeting.source === "none") {
+    reviewReasons.push(`Couldn't tell the meeting type; please set "${PEOPLE_FIELDS.meetingType}"`);
+  }
+  const needsReview = reviewReasons.length > 0;
+  const date = friendlyDate(start);
+
   const note = [
-    `${marker(key)} Added by the calendar agent from "${title}"${start ? ` (${start.slice(0, 10)})` : ""}.`,
+    `From calendar: ${meeting.type ?? "Meeting"}${date ? ` on ${date}` : ""} ("${title}")`,
     ...(analysis.company ? [`Company: ${analysis.company}`] : []),
     ...(clientEmail ? [`Email: ${clientEmail}`] : []),
     ...(needsReview ? [`⚠️ Needs review: ${reviewReasons.join("; ")}`] : []),
   ].join("\n");
 
   const outcome: Outcome = needsReview ? "created_needs_review" : "created";
+  const typeLabel = `${meeting.type ?? "type unknown"} (from ${meeting.source})`;
   if (dryRun) {
-    return { ...base, outcome, clientName: name, detail: `[dry run] Would create "${name}"${needsReview ? ` (review: ${reviewReasons.join("; ")})` : ""}` };
+    return {
+      ...base,
+      outcome,
+      clientName: name,
+      detail: `[dry run] Would create "${name}" — ${typeLabel}${needsReview ? ` (review: ${reviewReasons.join("; ")})` : ""}`,
+    };
   }
 
-  const recordId = await createPerson(cfg, { [PEOPLE_FIELDS.name]: name, [PEOPLE_FIELDS.note]: note });
-  people.push({ id: recordId, name, note, emails: clientEmail ? [clientEmail] : [], pastMeetings: [title] });
+  const fields: Record<string, string> = {
+    [PEOPLE_FIELDS.name]: name,
+    [PEOPLE_FIELDS.note]: note,
+    [PEOPLE_FIELDS.agentRef]: agentRef(key),
+  };
+  if (meeting.type) fields[PEOPLE_FIELDS.meetingType] = meeting.type;
+  const recordId = await createPerson(cfg, fields);
+  people.push({ id: recordId, name, note, agentRef: agentRef(key), emails: clientEmail ? [clientEmail] : [], pastMeetings: [title] });
 
   if (needsReview) {
     await notifySlack(
       cfg.slackWebhookUrl,
       [
-        `:warning: *New follow-up record needs a name check*`,
+        `:warning: *New follow-up record needs a check*`,
         `*Saved as:* ${name}${analysis.company ? ` (${analysis.company})` : ""}`,
         `*Meeting:* ${title}`,
-        `*When:* ${start}`,
+        `*When:* ${date || start}`,
+        `*Suggested meeting type:* ${meeting.type ?? "not sure"}${meeting.source === "guess" ? " (a guess)" : ""}`,
         `*Why:* ${reviewReasons.join("; ")}`,
-        `Please confirm or fix the name here: ${recordUrl(cfg, recordId)}`,
+        `Please confirm or fix it here: ${recordUrl(cfg, recordId)}`,
       ].join("\n"),
     );
   }
 
-  return { ...base, outcome, clientName: name, recordId, detail: needsReview ? `Created; sent to Slack for review (${reviewReasons.join("; ")})` : "Created" };
+  return {
+    ...base,
+    outcome,
+    clientName: name,
+    recordId,
+    detail: `Created — ${typeLabel}${needsReview ? `; sent to Slack for review (${reviewReasons.join("; ")})` : ""}`,
+  };
 }

@@ -1,11 +1,13 @@
 import { PEOPLE_FIELDS, MEETING_FIELDS, type AgentConfig } from "./config";
 import { namesSimilar, normalizeTokens } from "./match";
+import type { CrmMeeting } from "./meetingType";
 
 /** A row of the people table (Follow-Up Status), enriched with what the meetings table knows about them. */
 export interface Person {
   id: string;
   name: string;
   note: string;
+  agentRef: string;
   emails: string[];
   pastMeetings: string[];
 }
@@ -49,22 +51,31 @@ const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
  * on record for a similar name (so "Josh Mann" picks up josh@lifesciencepro.com even though the
  * people table has no email column, and "Joshn Mann" typos still line up).
  */
-export async function loadPeople(cfg: AgentConfig): Promise<Person[]> {
+export async function loadPeople(cfg: AgentConfig): Promise<{ people: Person[]; crmMeetings: CrmMeeting[] }> {
   const [peopleRows, meetingRows] = await Promise.all([
-    listAll(cfg, cfg.peopleTableId, [PEOPLE_FIELDS.name, PEOPLE_FIELDS.note]),
-    listAll(cfg, cfg.meetingsTableId, [MEETING_FIELDS.leadName, MEETING_FIELDS.email, MEETING_FIELDS.meetingName]),
+    listAll(cfg, cfg.peopleTableId, [PEOPLE_FIELDS.name, PEOPLE_FIELDS.note, PEOPLE_FIELDS.agentRef]),
+    listAll(cfg, cfg.meetingsTableId, [
+      MEETING_FIELDS.leadName,
+      MEETING_FIELDS.email,
+      MEETING_FIELDS.meetingName,
+      MEETING_FIELDS.meetingType,
+      MEETING_FIELDS.startDate,
+    ]),
   ]);
 
   const meetings = meetingRows.map((r) => ({
     leadName: str(r.fields[MEETING_FIELDS.leadName]),
     email: str(r.fields[MEETING_FIELDS.email]).toLowerCase(),
     meetingName: str(r.fields[MEETING_FIELDS.meetingName]),
+    meetingType: str(r.fields[MEETING_FIELDS.meetingType]),
+    start: str(r.fields[MEETING_FIELDS.startDate]),
   }));
 
   const people: Person[] = peopleRows.map((r) => ({
     id: r.id,
     name: str(r.fields[PEOPLE_FIELDS.name]),
     note: str(r.fields[PEOPLE_FIELDS.note]),
+    agentRef: str(r.fields[PEOPLE_FIELDS.agentRef]),
     emails: [],
     pastMeetings: [],
   }));
@@ -85,7 +96,13 @@ export async function loadPeople(cfg: AgentConfig): Promise<Person[]> {
       }
     }
   }
-  return people;
+  const crmMeetings: CrmMeeting[] = meetings.map(({ email, meetingName, start, meetingType }) => ({
+    email,
+    meetingName,
+    start,
+    meetingType,
+  }));
+  return { people, crmMeetings };
 }
 
 function tokenKey(name: string): string {
@@ -100,7 +117,8 @@ function mostComplete(people: Person[]): Person[] {
 export async function createPerson(cfg: AgentConfig, fields: Record<string, string>): Promise<string> {
   const json = (await airtableFetch(cfg, cfg.peopleTableId, "", {
     method: "POST",
-    body: JSON.stringify({ records: [{ fields }] }),
+    // typecast lets a dropdown value be written even if that option hasn't been added to the column yet.
+    body: JSON.stringify({ records: [{ fields }], typecast: true }),
   })) as { records: { id: string }[] };
   return json.records[0].id;
 }

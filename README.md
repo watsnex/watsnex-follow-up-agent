@@ -24,14 +24,17 @@ Every few minutes:
    - otherwise similar names are short-listed (tolerates typos like "Joshn Mann"/"Micheal",
      nicknames, middle initials like "Arra G", accents, credentials) and Claude decides whether one
      is the same person, using their past meetings and emails as evidence.
-5. **New person → creates a Follow -Up Status row** with the Name, and a Note saying which meeting
-   it came from (plus company and email when known).
-6. **Not sure?** (only a first name, no name at all, or *might* be someone already in the table) →
-   the row is **still created**, marked "⚠️ Needs review" in its Note, and a **Slack message** is
-   sent with a direct link to the row so you can fix the name in Airtable.
+5. **New person → creates a Follow -Up Status row** with the Name, a short Note (meeting type, date,
+   title, company and email when known) and the **Suggested Meeting Type** dropdown, which is always
+   filled in. The type comes from, in order: the same meeting's Meeting Type in Dashboard CRM; the
+   title's keywords (podcast, pre-podcast, follow up, growth plan, discovery, intro, and Calendly's
+   "<Name> and WATSNEX BioPharma" introduction titles); otherwise Claude's guess, which is flagged.
+6. **Not sure?** (only a first name, no name at all, *might* be someone already in the table, or the
+   meeting type is only a guess) → the row is **still created**, marked "⚠️ Needs review" in its Note,
+   and a **Slack message** is sent with the suggested meeting type and a direct link to the row.
 
-Each event is handled once. The row's Note is tagged with the Google event ID (`[gcal:…]`), so even
-after a restart the same event never creates a second row.
+Each event is handled once. The hidden **Agent Ref** column holds the Google event ID (`gcal:…`), so
+even after a restart the same event never creates a second row.
 
 ## Setup
 
