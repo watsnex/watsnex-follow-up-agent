@@ -8,6 +8,9 @@ export interface Person {
   name: string;
   note: string;
   agentRef: string;
+  /** "YYYY-MM-DD" or "" */
+  nextBooking: string;
+  meetingType: string;
   emails: string[];
   pastMeetings: string[];
 }
@@ -53,7 +56,13 @@ const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
  */
 export async function loadPeople(cfg: AgentConfig): Promise<{ people: Person[]; crmMeetings: CrmMeeting[] }> {
   const [peopleRows, meetingRows] = await Promise.all([
-    listAll(cfg, cfg.peopleTableId, [PEOPLE_FIELDS.name, PEOPLE_FIELDS.note, PEOPLE_FIELDS.agentRef]),
+    listAll(cfg, cfg.peopleTableId, [
+      PEOPLE_FIELDS.name,
+      PEOPLE_FIELDS.note,
+      PEOPLE_FIELDS.agentRef,
+      PEOPLE_FIELDS.nextBooking,
+      PEOPLE_FIELDS.meetingType,
+    ]),
     listAll(cfg, cfg.meetingsTableId, [
       MEETING_FIELDS.leadName,
       MEETING_FIELDS.email,
@@ -76,6 +85,8 @@ export async function loadPeople(cfg: AgentConfig): Promise<{ people: Person[]; 
     name: str(r.fields[PEOPLE_FIELDS.name]),
     note: str(r.fields[PEOPLE_FIELDS.note]),
     agentRef: str(r.fields[PEOPLE_FIELDS.agentRef]),
+    nextBooking: str(r.fields[PEOPLE_FIELDS.nextBooking]),
+    meetingType: str(r.fields[PEOPLE_FIELDS.meetingType]),
     emails: [],
     pastMeetings: [],
   }));
@@ -121,6 +132,13 @@ export async function createPerson(cfg: AgentConfig, fields: Record<string, stri
     body: JSON.stringify({ records: [{ fields }], typecast: true }),
   })) as { records: { id: string }[] };
   return json.records[0].id;
+}
+
+export async function updatePerson(cfg: AgentConfig, recordId: string, fields: Record<string, string>): Promise<void> {
+  await airtableFetch(cfg, cfg.peopleTableId, "", {
+    method: "PATCH",
+    body: JSON.stringify({ records: [{ id: recordId, fields }], typecast: true }),
+  });
 }
 
 export function recordUrl(cfg: AgentConfig, recordId: string): string {

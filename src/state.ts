@@ -9,7 +9,7 @@ export type Outcome = "created" | "created_needs_review" | "already_exists" | "n
 
 export interface AgentState {
   lastRunAt: string | null;
-  handled: Record<string, { title: string; outcome: Outcome; at: string; recordId?: string }>;
+  handled: Record<string, { title: string; start?: string; outcome: Outcome; at: string; recordId?: string }>;
 }
 
 const STATE_PATH = path.join(process.cwd(), "data", "state.json");

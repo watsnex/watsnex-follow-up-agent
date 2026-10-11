@@ -1,9 +1,9 @@
 import { getAgentConfig, PEOPLE_FIELDS, type AgentConfig } from "./config";
 import { listChangedEvents, type CalendarEvent } from "./google";
-import { loadPeople, createPerson, recordUrl, type Person } from "./airtable";
+import { loadPeople, createPerson, updatePerson, recordUrl, type Person } from "./airtable";
 import { findCandidates } from "./match";
 import { analyzeEvent } from "./extract";
-import { decideMeetingType, type CrmMeeting } from "./meetingType";
+import { decideMeetingType, type CrmMeeting, type MeetingTypeResult } from "./meetingType";
 import { notifySlack } from "./slack";
 import { loadState, saveState, type Outcome } from "./state";
 
@@ -135,19 +135,29 @@ async function syncOnce(opts: { dryRun?: boolean; since?: Date }): Promise<RunSu
     const title = event.summary ?? "";
     const start = event.start?.dateTime ?? event.start?.date ?? "";
     const previous = state.handled[key];
-
-    // Already handled and the title hasn't changed since → nothing new to learn.
-    // (A dry run previews every event; it never writes, so re-checking is harmless.)
-    if (!dryRun && previous && previous.title === title) continue;
-    // Once a person record exists for this event, never create another one, even if the title changes.
-    if (!dryRun && previous && previous.outcome !== "not_a_client_meeting") continue;
+    // Dry runs and backfills (--since) look at every event again; creating is still duplicate-checked.
+    const recheck = dryRun || Boolean(opts.since);
+    let rescheduledPerson: Person | undefined;
+    if (!recheck && previous) {
+      const sameTitle = previous.title === title;
+      // Nothing changed that matters (or it's a non-client event whose title didn't change).
+      if (sameTitle && (previous.start === start || !previous.recordId)) continue;
+      // Only the time moved → move the booking date; no need to ask Claude again.
+      if (sameTitle) {
+        rescheduledPerson = people.find((p) => p.id === previous.recordId);
+        if (!rescheduledPerson) continue;
+      }
+    }
 
     try {
-      const result = await handleEvent(cfg, event, key, people, crmMeetings, dryRun);
+      const result = rescheduledPerson
+        ? await handleReschedule(cfg, event, key, rescheduledPerson, crmMeetings, dryRun)
+        : await handleEvent(cfg, event, key, people, crmMeetings, dryRun);
       summary.results.push(result);
       if (!dryRun && result.outcome !== "error") {
         state.handled[key] = {
           title,
+          start,
           outcome: result.outcome as Outcome,
           at: now.toISOString(),
           recordId: result.recordId,
@@ -188,7 +198,9 @@ async function handleEvent(
   // 1. This exact calendar event already produced a record (e.g. state file was lost).
   const tagged = people.find((p) => createdFromEvent(p, key));
   if (tagged) {
-    return { ...base, outcome: "already_exists", clientName: tagged.name, recordId: tagged.id, detail: "Record already created from this event" };
+    const meeting = decideMeetingType(crmMeetings, { title, start, emails: [], guess: null });
+    const booking = await applyBooking(cfg, tagged, { title, start, meeting }, dryRun);
+    return { ...base, outcome: "already_exists", clientName: tagged.name, recordId: tagged.id, detail: `Record already created from this event; ${booking}` };
   }
 
   const attendees = (event.attendees ?? []).filter(
@@ -217,6 +229,14 @@ async function handleEvent(
     return { ...base, outcome: "not_a_client_meeting", detail: analysis.reason };
   }
 
+  // Meeting type: Dashboard CRM, then the title, then Claude's guess (flagged for a human to check).
+  const meeting = decideMeetingType(crmMeetings, {
+    title,
+    start,
+    emails: attendeeEmails,
+    guess: analysis.meetingType === "Unknown" ? null : analysis.meetingType,
+  });
+
   // 3. Duplicate check. An email that belongs to exactly one known person always wins,
   //    regardless of how the name is spelled.
   const clientEmail =
@@ -224,12 +244,14 @@ async function handleEvent(
   const emailOwners = clientEmail ? people.filter((p) => p.emails.includes(clientEmail)) : [];
   if (emailOwners.length === 1) {
     const p = emailOwners[0];
-    return { ...base, outcome: "already_exists", clientName: p.name, recordId: p.id, detail: `Same email as existing person "${p.name}"` };
+    const booking = await applyBooking(cfg, p, { title, start, meeting }, dryRun);
+    return { ...base, outcome: "already_exists", clientName: p.name, recordId: p.id, detail: `Same email as existing person "${p.name}"; ${booking}` };
   }
 
   const nameMatch = candidates.find((c) => c.id === analysis.matchedRecordId);
   if (nameMatch && analysis.matchConfidence === "certain") {
-    return { ...base, outcome: "already_exists", clientName: nameMatch.name, recordId: nameMatch.id, detail: `Matches existing person "${nameMatch.name}"` };
+    const booking = await applyBooking(cfg, nameMatch, { title, start, meeting }, dryRun);
+    return { ...base, outcome: "already_exists", clientName: nameMatch.name, recordId: nameMatch.id, detail: `Matches existing person "${nameMatch.name}"; ${booking}` };
   }
 
   // 4. New person → create the record. Flag it for review when the agent isn't sure.
@@ -242,12 +264,6 @@ async function handleEvent(
   const name = analysis.clientName || clientEmail || `Unknown – ${title}`;
 
   // Meeting type is always filled in; a guess (or no answer) is flagged so someone checks it.
-  const meeting = decideMeetingType(crmMeetings, {
-    title,
-    start,
-    emails: clientEmail ? [clientEmail, ...attendeeEmails] : attendeeEmails,
-    guess: analysis.meetingType === "Unknown" ? null : analysis.meetingType,
-  });
   if (meeting.source === "guess") {
     reviewReasons.push(`Meeting type is a guess ("${meeting.type}"); please check "${PEOPLE_FIELDS.meetingType}"`);
   } else if (meeting.source === "none") {
@@ -280,10 +296,19 @@ async function handleEvent(
     [PEOPLE_FIELDS.agentRef]: agentRef(key),
   };
   if (meeting.type) fields[PEOPLE_FIELDS.meetingType] = meeting.type;
-  const meetingDay = isoDate(start);
-  if (meetingDay) fields[PEOPLE_FIELDS.meetingDate] = meetingDay;
+  const bookingDay = upcomingDay(start);
+  if (bookingDay && !isCanceled(title)) fields[PEOPLE_FIELDS.nextBooking] = bookingDay;
   const recordId = await createPerson(cfg, fields);
-  people.push({ id: recordId, name, note, agentRef: agentRef(key), emails: clientEmail ? [clientEmail] : [], pastMeetings: [title] });
+  people.push({
+    id: recordId,
+    name,
+    note,
+    agentRef: agentRef(key),
+    nextBooking: fields[PEOPLE_FIELDS.nextBooking] ?? "",
+    meetingType: meeting.type ?? "",
+    emails: clientEmail ? [clientEmail] : [],
+    pastMeetings: [title],
+  });
 
   if (needsReview) {
     await notifySlack(
@@ -307,4 +332,85 @@ async function handleEvent(
     recordId,
     detail: `Created — ${typeLabel}${needsReview ? `; sent to Slack for review (${reviewReasons.join("; ")})` : ""}`,
   };
+}
+
+function isCanceled(title: string): boolean {
+  return /^cancel+ed:/i.test(title.trim());
+}
+
+/** The meeting's day ("YYYY-MM-DD") if it's today or later, otherwise null. */
+function upcomingDay(start: string): string | null {
+  const day = isoDate(start);
+  const today = isoDate(new Date().toISOString());
+  return day && today && day >= today ? day : null;
+}
+
+/**
+ * An existing lead has a booking: set Next Booking and Suggested Meeting Type to it, unless they
+ * already have an earlier upcoming booking (that one stays "next"). Past and canceled meetings
+ * don't change anything. Returns a short description of what happened, for the log.
+ */
+async function applyBooking(
+  cfg: AgentConfig,
+  person: Person,
+  booking: { title: string; start: string; meeting: MeetingTypeResult },
+  dryRun: boolean,
+): Promise<string> {
+  if (isCanceled(booking.title)) return "canceled booking, nothing updated";
+  const day = upcomingDay(booking.start);
+  if (!day) return "meeting already past, booking not updated";
+  const today = isoDate(new Date().toISOString())!;
+  if (person.nextBooking && person.nextBooking >= today && person.nextBooking < day) {
+    return `keeps earlier upcoming booking (${person.nextBooking})`;
+  }
+
+  const fields: Record<string, string> = {};
+  if (person.nextBooking !== day) fields[PEOPLE_FIELDS.nextBooking] = day;
+  if (booking.meeting.type && person.meetingType !== booking.meeting.type) {
+    fields[PEOPLE_FIELDS.meetingType] = booking.meeting.type;
+  }
+  if (Object.keys(fields).length === 0) return "booking already up to date";
+
+  const change = [
+    ...(fields[PEOPLE_FIELDS.nextBooking] ? [`Next Booking ${person.nextBooking || "(empty)"} → ${day}`] : []),
+    ...(fields[PEOPLE_FIELDS.meetingType]
+      ? [`type ${person.meetingType || "(empty)"} → ${booking.meeting.type} (from ${booking.meeting.source})`]
+      : []),
+  ].join(", ");
+  if (dryRun) return `[dry run] would update ${change}`;
+
+  await updatePerson(cfg, person.id, fields);
+  if (fields[PEOPLE_FIELDS.nextBooking]) person.nextBooking = day;
+  if (fields[PEOPLE_FIELDS.meetingType]) person.meetingType = fields[PEOPLE_FIELDS.meetingType];
+
+  if (booking.meeting.source === "guess" || booking.meeting.source === "none") {
+    await notifySlack(
+      cfg.slackWebhookUrl,
+      [
+        `:calendar: *Existing lead booked again: please check the meeting type*`,
+        `*Lead:* ${person.name}`,
+        `*Meeting:* ${booking.title}`,
+        `*When:* ${friendlyDate(booking.start)}`,
+        `*Suggested meeting type:* ${booking.meeting.type ? `${booking.meeting.type} (a guess)` : "not sure"}`,
+        `Please confirm or fix it here: ${recordUrl(cfg, person.id)}`,
+      ].join("\n"),
+    );
+  }
+  return `updated ${change}`;
+}
+
+/** The event that created or matched this person only moved in time: update the booking, no Claude call. */
+async function handleReschedule(
+  cfg: AgentConfig,
+  event: CalendarEvent,
+  key: string,
+  person: Person,
+  crmMeetings: CrmMeeting[],
+  dryRun: boolean,
+): Promise<EventResult> {
+  const title = event.summary ?? "";
+  const start = event.start?.dateTime ?? event.start?.date ?? "";
+  const meeting = decideMeetingType(crmMeetings, { title, start, emails: person.emails, guess: null });
+  const booking = await applyBooking(cfg, person, { title, start, meeting: meeting.type ? meeting : { type: null, source: "title" } }, dryRun);
+  return { eventId: key, title, start, outcome: "already_exists", clientName: person.name, recordId: person.id, detail: `Rescheduled; ${booking}` };
 }

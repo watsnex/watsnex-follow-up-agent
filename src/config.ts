@@ -64,7 +64,8 @@ export const PEOPLE_FIELDS = {
   name: "Name",
   note: "Note",
   meetingType: "Suggested Meeting Type",
-  meetingDate: "Meeting Date",
+  // Date of the person's upcoming booking; also updated when an existing lead books again.
+  nextBooking: "Next Booking",
   // Hidden column holding the calendar event the row was created from, so it's never created twice.
   agentRef: "Agent Ref",
 } as const;

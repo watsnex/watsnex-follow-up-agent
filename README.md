@@ -25,13 +25,18 @@ Every few minutes:
      nicknames, middle initials like "Arra G", accents, credentials) and Claude decides whether one
      is the same person, using their past meetings and emails as evidence.
 5. **New person → creates a Follow -Up Status row** with the Name, a short Note (meeting type, date,
-   title, company and email when known), the **Meeting Date**, and the **Suggested Meeting Type** dropdown, which is always
+   title, company and email when known), **Next Booking** (the meeting's date, if upcoming), and the **Suggested Meeting Type** dropdown, which is always
    filled in. The type comes from, in order: the same meeting's Meeting Type in Dashboard CRM; the
    title's keywords (podcast, pre-podcast, follow up, growth plan, discovery, intro, and Calendly's
    "<Name> and WATSNEX BioPharma" introduction titles); otherwise Claude's guess, which is flagged.
 6. **Not sure?** (only a first name, no name at all, *might* be someone already in the table, or the
    meeting type is only a guess) → the row is **still created**, marked "⚠️ Needs review" in its Note,
    and a **Slack message** is sent with the suggested meeting type and a direct link to the row.
+
+7. **Existing lead books again** → their row's **Next Booking** and **Suggested Meeting Type** are
+   updated to the new booking, unless they already have an earlier upcoming booking (that one stays
+   "next"). Past and "Canceled:" meetings change nothing. A guessed meeting type goes to Slack. If a
+   booking is only moved to another time, the date follows it (no Claude call needed).
 
 Each event is handled once. The hidden **Agent Ref** column holds the Google event ID (`gcal:…`), so
 even after a restart the same event never creates a second row.
