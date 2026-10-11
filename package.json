@@ -1,0 +1,25 @@
+{
+  "name": "watsnex-follow-up-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Watches Google Calendar for WATSNEX business meetings and keeps the Airtable Follow-Up Status table up to date.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "once": "tsx src/index.ts --once",
+    "dry-run": "tsx src/index.ts --dry-run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
+    "tsx": "^4.23.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  }
+}
